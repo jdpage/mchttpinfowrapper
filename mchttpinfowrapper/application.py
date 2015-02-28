@@ -5,6 +5,7 @@ from . import minecraft
 
 _logger = logging.getLogger(__name__)
 
+
 class Application:
     def __init__(self, config_file='config.ini'):
         _logger.info("Parsing config")
@@ -21,4 +22,3 @@ class Application:
 
 #         self.port = mc_config.get("Port", 80)
 #         self.host = mc_config.get("Host", "0.0.0.0")
-

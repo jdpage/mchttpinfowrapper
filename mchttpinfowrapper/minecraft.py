@@ -2,19 +2,22 @@ import asyncio
 import asyncio.subprocess
 import logging
 import re
-import os, os.path
-import sys, fcntl
+import os
+import os.path
+import fcntl
+import sys
 
 _logger = logging.getLogger(__name__)
 
 _log_line_re = re.compile(
-        r'''^''' +
-        r'''\[(?P<hh>\d+):(?P<mm>\d+):(?P<ss>\d+)\] ''' +
-        r'''\[(?P<thread>.*)/(?P<level>.*)\]''' +
-        r''': ?(?P<msg>.*)$''')
+    r'''^''' +
+    r'''\[(?P<hh>\d+):(?P<mm>\d+):(?P<ss>\d+)\] ''' +
+    r'''\[(?P<thread>.*)/(?P<level>.*)\]''' +
+    r''': ?(?P<msg>.*)$''')
 
 _player_joined_re = re.compile(r'''^(?P<name>\w*) joined the game$''')
 _player_left_re = re.compile(r'''^(?P<name>\w*) left the game$''')
+
 
 class ServerWrapper:
     def __init__(self, mc_config):
@@ -23,8 +26,11 @@ class ServerWrapper:
         self._server_flags = mc_config.get("ServerFlags", "").split()
         self._working_dir = mc_config.get("WorkingDirectory", ".")
 
+        self.process = None
         self._mc_logger = logging.getLogger(__name__ + '.process')
         self._input_stream = None
+        self._input_task = None
+        self._output_task = None
 
         self.players = []
         self._log_events = []
@@ -39,7 +45,8 @@ class ServerWrapper:
         line.extend(self._server_flags)
         return line
 
-    def parse_log_level(self, level):
+    @staticmethod
+    def parse_log_level(level):
         if level == 'ERROR':
             return 40
         elif level == 'WARNING':
@@ -66,7 +73,7 @@ class ServerWrapper:
                 result = callback(m)
                 if asyncio.iscoroutine(result):
                     result = yield from result
-                suppress = suppress or r
+                suppress = suppress or result
         return suppress
 
     @asyncio.coroutine
@@ -92,15 +99,15 @@ class ServerWrapper:
         old_wd = os.getcwd()
         os.chdir(self._working_dir)
         _logger.info("Starting Minecraft server process")
-        self.proc = yield from asyncio.create_subprocess_exec(
-                *self.get_server_cmd_line(),
-                stdout=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.PIPE)
+        self.process = yield from asyncio.create_subprocess_exec(
+            *self.get_server_cmd_line(),
+            stdout=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE)
         os.chdir(old_wd)
 
     @asyncio.coroutine
     def wait(self):
-        yield from self.proc.wait()
+        yield from self.process.wait()
         _logger.info("Minecraft server stopped")
         self._input_task.cancel()
         self._output_task.cancel()
@@ -110,8 +117,8 @@ class ServerWrapper:
             loop = asyncio.get_event_loop()
 
         self._input_stream = asyncio.StreamReader(loop=loop)
-        
-        # make stdin nonblocking
+
+        # make sys.stdin non-blocking
         flags = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL)
         fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
@@ -132,7 +139,7 @@ class ServerWrapper:
     def handle_output(self):
         data = True
         while data:
-            data = yield from self.proc.stdout.readline()
+            data = yield from self.process.stdout.readline()
             line = data.decode('utf-8').rstrip()
             yield from self.handle_log_line(line)
 
@@ -144,16 +151,16 @@ class ServerWrapper:
             if data == b'll\n':
                 _logger.info(str(self.players))
             else:
-                self.proc.stdin.write(data)
-                yield from self.proc.stdin.drain()
+                self.process.stdin.write(data)
+                yield from self.process.stdin.drain()
 
     @asyncio.coroutine
     def send_command(self, line):
         """Sends a line to the server process."""
         # because handle_input only sends input line-by-line, we can safely
         # send any lines we like without worrying about corrupting the stream
-        self.proc.stdin.write("{0}\n".format(line).encode())
-        yield from self.proc.stdin.drain()
+        self.process.stdin.write("{0}\n".format(line).encode())
+        yield from self.process.stdin.drain()
 
     @asyncio.coroutine
     def send_command_and_wait(self, line, pattern, suppress=True):
@@ -161,12 +168,15 @@ class ServerWrapper:
         sem = asyncio.Semaphore(value=0)
         mm = None
         e = None
+
         @asyncio.coroutine
         def callback(m):
+            nonlocal mm
             self.remove_log_event(e)
             mm = m
             yield from sem.release()
             return suppress
+
         e = self.add_log_event(pattern, callback)
 
         # now that we're prepared for the response, we can send the command and
