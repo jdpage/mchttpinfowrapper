@@ -24,19 +24,6 @@ class Server:
         return bytes(random.randint(0, 255) for _ in range(32))
 
     @asyncio.coroutine
-    def handle_players(self, _):
-        return web.Response(
-            body=json.dumps(self._mc_server.players).encode('utf-8'))
-
-    @asyncio.coroutine
-    def handle_stop(self, request):
-        auth_request = yield from self.require_authentication(request)
-        if auth_request:
-            return auth_request
-        yield from self._mc_server.stop()
-        return web.Response()
-
-    @asyncio.coroutine
     def require_authentication(self, request):
         if not self._key:
             return web.Response(status=403)
@@ -53,13 +40,65 @@ class Server:
             }
         )
 
+    @asyncio.coroutine
+    def handle_root(self, _):
+        return web.Response(
+            body=json.dumps({
+                'player info': {
+                    'method': 'GET',
+                    'href': '/players',
+                },
+                'server info': {
+                    'method': 'GET',
+                    'href': '/server',
+                },
+            }).encode('utf-8')
+        )
 
+    @asyncio.coroutine
+    def handle_server(self, _):
+        return web.Response(
+            body=json.dumps({
+                'stats': {
+                    'uptime': str(self._mc_server.uptime()),
+                },
+                'shutdown server': {
+                    'method': 'POST',
+                    'href': '/server/stop',
+                },
+            }).encode('utf-8')
+        )
+
+    @asyncio.coroutine
+    def handle_players(self, _):
+        player_info = dict()
+        for player in self._mc_server.players():
+            player_info[player] = {
+                'play time': str(self._mc_server.time_since_joined(player))
+            }
+        tslp = self._mc_server.time_since_last_part()
+        return web.Response(
+            body=json.dumps({
+                'time since last part': tslp and str(tslp),
+                'players': player_info,
+            }).encode('utf-8')
+        )
+
+    @asyncio.coroutine
+    def handle_server_stop(self, request):
+        auth_request = yield from self.require_authentication(request)
+        if auth_request:
+            return auth_request
+        yield from self._mc_server.stop()
+        return web.Response()
 
     @asyncio.coroutine
     def start(self, loop):
         app = web.Application(loop=loop)
+        app.router.add_route('GET', '/', self.handle_root)
         app.router.add_route('GET', '/players', self.handle_players)
-        app.router.add_route('POST', '/server/stop', self.handle_stop)
+        app.router.add_route('GET', '/server', self.handle_server)
+        app.router.add_route('POST', '/server/stop', self.handle_server_stop)
         self._http_server = yield from loop.create_server(
             app.make_handler(),
             self._host, self._port)

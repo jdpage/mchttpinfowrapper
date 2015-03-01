@@ -6,6 +6,7 @@ import os
 import os.path
 import fcntl
 import sys
+from datetime import datetime
 
 _logger = logging.getLogger(__name__)
 
@@ -33,7 +34,9 @@ class ServerWrapper:
         self._input_task = None
         self._output_task = None
 
-        self.players = []
+        self._start_time = datetime.now()
+        self._last_part = None
+        self._players = dict()
         self._log_events = []
         self.add_log_event(_player_joined_re, self._player_joined_callback)
         self.add_log_event(_player_left_re, self._player_left_callback)
@@ -154,7 +157,7 @@ class ServerWrapper:
         while data:
             data = yield from self._input_stream.readline()
             if data == b'll\n':
-                _logger.info(str(self.players))
+                _logger.info(str(self.players()))
             else:
                 self.process.stdin.write(data)
                 yield from self.process.stdin.drain()
@@ -198,8 +201,23 @@ class ServerWrapper:
 
         yield from self.send_command('stop')
 
+    def uptime(self):
+        return datetime.now() - self._start_time
+
     def _player_joined_callback(self, m):
-        self.players.append(m.group('name'))
+        self._players[m.group('name')] = datetime.now()
 
     def _player_left_callback(self, m):
-        self.players.remove(m.group('name'))
+        del self._players[m.group('name')]
+        self._last_part = datetime.now()
+
+    def players(self):
+        return list(self._players.keys())
+
+    def time_since_joined(self, player):
+        return datetime.now() - self._players[player]
+
+    def time_since_last_part(self):
+        if self._last_part:
+            return datetime.now() - self._last_part
+        return None
