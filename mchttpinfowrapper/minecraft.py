@@ -18,13 +18,14 @@ _log_line_re = re.compile(
 _player_joined_re = re.compile(r'''^(?P<name>\w*) joined the game$''')
 _player_left_re = re.compile(r'''^(?P<name>\w*) left the game$''')
 
+# TODO: rewrite this as a subprocess protocol
 
 class ServerWrapper:
     def __init__(self, mc_config):
-        self._server_jar = os.path.abspath(mc_config.get("ServerJar"))
-        self._java_flags = mc_config.get("JavaFlags", "").split()
-        self._server_flags = mc_config.get("ServerFlags", "").split()
-        self._working_dir = mc_config.get("WorkingDirectory", ".")
+        self._server_jar = os.path.abspath(mc_config.get('ServerJar'))
+        self._java_flags = mc_config.get('JavaFlags', "").split()
+        self._server_flags = mc_config.get('ServerFlags', "").split()
+        self._working_dir = mc_config.get('WorkingDirectory', ".")
 
         self.process = None
         self._mc_logger = logging.getLogger(__name__ + '.process')
@@ -96,6 +97,10 @@ class ServerWrapper:
             _logger.info("working directory does not exist")
             os.mkdir(self._working_dir)
             _logger.info("created working directory '%s'", self._working_dir)
+        eula = os.path.join(self._working_dir, 'eula.txt')
+        _logger.info("Agreeing to EULA")
+        with open(eula, 'w') as f:
+            f.write("eula=true")
         old_wd = os.getcwd()
         os.chdir(self._working_dir)
         _logger.info("Starting Minecraft server process")
