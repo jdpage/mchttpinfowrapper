@@ -62,11 +62,11 @@ class Server:
     def handle_root(self, _):
         return web.Response(
             body=json.dumps({
-                'player info': {
+                'player_info': {
                     'method': 'GET',
                     'href': '/players',
                 },
-                'server info': {
+                'server_info': {
                     'method': 'GET',
                     'href': '/server',
                 },
@@ -80,7 +80,7 @@ class Server:
                 'stats': {
                     'uptime': str(self._mc_server.uptime()),
                 },
-                'shutdown server': {
+                'shutdown_server': {
                     'method': 'POST',
                     'href': '/server/stop',
                 },
@@ -92,12 +92,12 @@ class Server:
         player_info = dict()
         for player in self._mc_server.players():
             player_info[player] = {
-                'play time': str(self._mc_server.time_since_joined(player))
+                'play_time': str(self._mc_server.time_since_joined(player))
             }
         tslp = self._mc_server.time_since_last_part()
         return web.Response(
             body=json.dumps({
-                'time since last part': tslp and str(tslp),
+                'time_since_last_part': tslp and str(tslp),
                 'players': player_info,
             }).encode('utf-8')
         )
