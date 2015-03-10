@@ -36,10 +36,16 @@ class Server:
         self._mc_server = mc_server
         self._http_server = None
         self._tokens = dict()
+        self._loop = None
 
     @staticmethod
     def make_token():
         return bytes(random.randint(0, 255) for _ in range(32))
+
+    @staticmethod
+    def make_body(data):
+        return json.dumps(data, sort_keys=True, indent=4,
+                          separators=(',', ': ')).encode('utf-8')
 
     @asyncio.coroutine
     def require_authentication(self, request):
@@ -59,32 +65,54 @@ class Server:
         )
 
     @asyncio.coroutine
+    def method_not_allowed(self, allowed, body=None):
+        return web.Response(
+            status=405,
+            body=body,
+            headers={
+                'Allow': ", ".join(allowed)
+            }
+        )
+
+    @asyncio.coroutine
     def handle_root(self, _):
         return web.Response(
-            body=json.dumps({
-                'player_info': {
-                    'method': 'GET',
-                    'href': '/players',
-                },
-                'server_info': {
-                    'method': 'GET',
-                    'href': '/server',
-                },
-            }).encode('utf-8')
+            body=self.make_body({
+                'endpoints': {
+                    'players': {
+                        'method': 'GET',
+                        'href': '/players',
+                    },
+                    'server': {
+                        'method': 'GET',
+                        'href': '/server',
+                    },
+                }
+            })
         )
 
     @asyncio.coroutine
     def handle_server(self, _):
+        actions = {}
+        if self._mc_server.can_start():
+            actions['start_server'] = {
+                'method': 'POST',
+                'href': '/server/start',
+            }
+        if self._mc_server.can_stop():
+            actions['stop_server'] = {
+                'method': 'POST',
+                'href': '/server/stop',
+            }
         return web.Response(
-            body=json.dumps({
+            body=self.make_body({
                 'stats': {
-                    'uptime': str(self._mc_server.uptime()),
+                    'status_changed_at':
+                        self._mc_server.status_changed_at().isoformat(),
+                    'status': self._mc_server.status(),
                 },
-                'shutdown_server': {
-                    'method': 'POST',
-                    'href': '/server/stop',
-                },
-            }).encode('utf-8')
+                'endpoints': actions,
+            })
         )
 
     @asyncio.coroutine
@@ -92,21 +120,43 @@ class Server:
         player_info = dict()
         for player in self._mc_server.players():
             player_info[player] = {
-                'play_time': str(self._mc_server.time_since_joined(player))
+                'joined_at': self._mc_server.joined_at(player).isoformat()
             }
-        tslp = self._mc_server.time_since_last_part()
+        last_part = self._mc_server.last_part_at()
         return web.Response(
-            body=json.dumps({
-                'time_since_last_part': tslp and str(tslp),
+            body=self.make_body({
+                'last_part_at': last_part and last_part.isoformat(),
                 'players': player_info,
-            }).encode('utf-8')
+            })
         )
+
+    @asyncio.coroutine
+    def handle_server_start(self, request):
+        auth_request = yield from self.require_authentication(request)
+        if auth_request:
+            return auth_request
+        if not self._mc_server.can_start():
+            return (yield from self.method_not_allowed(
+                allowed=[],
+                body=self.make_body({
+                    'server_status': self._mc_server.status(),
+                })
+            ))
+        yield from self._mc_server.start(self._loop)
+        return web.Response()
 
     @asyncio.coroutine
     def handle_server_stop(self, request):
         auth_request = yield from self.require_authentication(request)
         if auth_request:
             return auth_request
+        if not self._mc_server.can_stop():
+            return (yield from self.method_not_allowed(
+                allowed=[],
+                body=self.make_body({
+                    'server_status': self._mc_server.status()
+                })
+            ))
         yield from self._mc_server.stop()
         return web.Response()
 
@@ -116,10 +166,12 @@ class Server:
         app.router.add_route('GET', '/', self.handle_root)
         app.router.add_route('GET', '/players', self.handle_players)
         app.router.add_route('GET', '/server', self.handle_server)
+        app.router.add_route('POST', '/server/start', self.handle_server_start)
         app.router.add_route('POST', '/server/stop', self.handle_server_stop)
         self._http_server = yield from loop.create_server(
             app.make_handler(),
             self._host, self._port)
+        self._loop = loop
 
     @asyncio.coroutine
     def stop(self):

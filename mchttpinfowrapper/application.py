@@ -36,8 +36,8 @@ class Application:
         _logger.info("Starting application")
         loop = asyncio.get_event_loop()
 
-        loop.run_until_complete(self.mc_server.start())
-        self.mc_server.handle_io(loop)
+        loop.run_until_complete(self.mc_server.start(loop))
         loop.create_task(self.http_server.start(loop))
-        loop.run_until_complete(self.mc_server.wait())
-        loop.run_until_complete(self.http_server.stop())
+        loop.run_forever()
+        # loop.run_until_complete(self.mc_server.wait())
+        # loop.run_until_complete(self.http_server.stop())

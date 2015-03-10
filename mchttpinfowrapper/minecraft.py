@@ -25,6 +25,7 @@ import os.path
 import fcntl
 import sys
 from datetime import datetime
+import pytz
 
 _logger = logging.getLogger(__name__)
 
@@ -36,8 +37,11 @@ _log_line_re = re.compile(
 
 _player_joined_re = re.compile(r'''^(?P<name>\w*) joined the game$''')
 _player_left_re = re.compile(r'''^(?P<name>\w*) left the game$''')
+_server_started_re = re.compile(
+    r'''^Done \((?P<time>.+)\)! For help, type "help" or "\?"$''')
 
 # TODO: rewrite this as a subprocess protocol
+
 
 class ServerWrapper:
     def __init__(self, mc_config):
@@ -52,12 +56,17 @@ class ServerWrapper:
         self._input_task = None
         self._output_task = None
 
-        self._start_time = datetime.now()
+        self._set_status('stopped')
         self._last_part = None
         self._players = dict()
         self._log_events = []
         self.add_log_event(_player_joined_re, self._player_joined_callback)
         self.add_log_event(_player_left_re, self._player_left_callback)
+        self.add_log_event(_server_started_re, self._server_started_callback)
+
+    @staticmethod
+    def _now_tz():
+        return pytz.UTC.localize(datetime.utcnow())
 
     def get_server_cmd_line(self):
         line = ["java"]
@@ -112,16 +121,21 @@ class ServerWrapper:
             self._mc_logger.warn(line)
 
     @asyncio.coroutine
-    def start(self):
+    def agree_to_eula(self):
+        eula = os.path.join(self._working_dir, 'eula.txt')
+        _logger.info("Agreeing to EULA")
+        with open(eula, 'w') as f:
+            f.write("eula=true\n")
+
+    @asyncio.coroutine
+    def start(self, loop=None):
+        self._set_status('starting')
         _logger.info("Preparing to start Minecraft server process")
         if not os.path.isdir(self._working_dir):
             _logger.info("working directory does not exist")
             os.mkdir(self._working_dir)
             _logger.info("created working directory '%s'", self._working_dir)
-        eula = os.path.join(self._working_dir, 'eula.txt')
-        _logger.info("Agreeing to EULA")
-        with open(eula, 'w') as f:
-            f.write("eula=true")
+        yield from self.agree_to_eula()
         old_wd = os.getcwd()
         os.chdir(self._working_dir)
         _logger.info("Starting Minecraft server process")
@@ -130,13 +144,21 @@ class ServerWrapper:
             stdout=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE)
         os.chdir(old_wd)
+        self.handle_io(loop)
+        loop.create_task(self._clean_up_after_stop(loop))
+
+    @asyncio.coroutine
+    def _clean_up_after_stop(self, loop):
+        yield from self.process.wait()
+        self._set_status('stopped')
+        loop.remove_reader(sys.stdin.fileno())
+        self._input_task.cancel()
+        self._output_task.cancel()
+        _logger.info("Minecraft server stopped")
 
     @asyncio.coroutine
     def wait(self):
         yield from self.process.wait()
-        _logger.info("Minecraft server stopped")
-        self._input_task.cancel()
-        self._output_task.cancel()
 
     def handle_io(self, loop=None):
         if not loop:
@@ -217,25 +239,42 @@ class ServerWrapper:
 
         Functions by sending the string 'stop' to the server via stdin."""
 
+        self._set_status('stopping')
         yield from self.send_command('stop')
 
-    def uptime(self):
-        return datetime.now() - self._start_time
-
     def _player_joined_callback(self, m):
-        self._players[m.group('name')] = datetime.now()
+        self._players[m.group('name')] = self._now_tz()
 
     def _player_left_callback(self, m):
         del self._players[m.group('name')]
-        self._last_part = datetime.now()
+        self._last_part = self._now_tz()
+
+    def _server_started_callback(self, _):
+        self._set_status('running')
 
     def players(self):
         return list(self._players.keys())
 
-    def time_since_joined(self, player):
-        return datetime.now() - self._players[player]
+    def joined_at(self, player):
+        return self._players[player]
 
-    def time_since_last_part(self):
+    def last_part_at(self):
         if self._last_part:
-            return datetime.now() - self._last_part
+            return self._last_part
         return None
+
+    def status(self):
+        return self._status
+
+    def _set_status(self, status):
+        self._status = status
+        self._status_changed_time = self._now_tz()
+
+    def status_changed_at(self):
+        return self._status_changed_time
+
+    def can_start(self):
+        return self._status == 'stopped'
+
+    def can_stop(self):
+        return self._status == 'running'
