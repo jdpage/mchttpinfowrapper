@@ -28,7 +28,7 @@ _logger = logging.getLogger(__name__)
 
 class Server:
     def __init__(self, http_config, mc_server):
-        self._host = http_config.get('Host', "0.0.0.0")
+        self._host = http_config.get('Host', None)
         self._port = int(http_config.get('Port', "80"))
         self._key = http_config.get('SecretKey', None)
         if self._key:
