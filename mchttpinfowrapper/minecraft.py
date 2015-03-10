@@ -154,6 +154,7 @@ class ServerWrapper:
         loop.remove_reader(sys.stdin.fileno())
         self._input_task.cancel()
         self._output_task.cancel()
+        self.process = None
         _logger.info("Minecraft server stopped")
 
     @asyncio.coroutine
