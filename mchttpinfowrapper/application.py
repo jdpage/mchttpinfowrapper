@@ -20,7 +20,6 @@ import asyncio
 import configparser
 import logging
 import signal
-import sys
 from . import minecraft, web
 
 _logger = logging.getLogger(__name__)
@@ -40,17 +39,18 @@ class Application:
         loop.run_until_complete(self.mc_server.start(loop))
         loop.create_task(self.http_server.start(loop))
 
-        def stop(signame):
+        def stop(signal_name):
             def handler():
-                _logger.info('received signal %s', signame)
+                _logger.info('received signal %s', signal_name)
                 # relay signal to minecraft process
                 if self.mc_server.process:
-                    self.mc_server.process.send_signal(getattr(signal, signame))
+                    self.mc_server.process.send_signal(
+                        getattr(signal, signal_name))
                 loop.stop()
             return handler
 
-        for signame in ['SIGINT', 'SIGTERM']:
-            loop.add_signal_handler(getattr(signal, signame), stop(signame))
+        for sig_name in ['SIGINT', 'SIGTERM']:
+            loop.add_signal_handler(getattr(signal, sig_name), stop(sig_name))
 
         try:
             loop.run_forever()

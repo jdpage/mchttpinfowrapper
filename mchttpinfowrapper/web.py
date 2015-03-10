@@ -136,12 +136,14 @@ class Server:
         if auth_request:
             return auth_request
         if not self._mc_server.can_start():
-            return (yield from self.method_not_allowed(
-                allowed=[],
-                body=self.make_body({
-                    'server_status': self._mc_server.status(),
-                })
-            ))
+            return (
+                yield from self.method_not_allowed(
+                    allowed=[],
+                    body=self.make_body({
+                        'server_status': self._mc_server.status(),
+                    })
+                )
+            )
         yield from self._mc_server.start(self._loop)
         return web.Response()
 
@@ -151,12 +153,14 @@ class Server:
         if auth_request:
             return auth_request
         if not self._mc_server.can_stop():
-            return (yield from self.method_not_allowed(
-                allowed=[],
-                body=self.make_body({
-                    'server_status': self._mc_server.status()
-                })
-            ))
+            return (
+                yield from self.method_not_allowed(
+                    allowed=[],
+                    body=self.make_body({
+                        'server_status': self._mc_server.status()
+                    })
+                )
+            )
         yield from self._mc_server.stop()
         return web.Response()
 
