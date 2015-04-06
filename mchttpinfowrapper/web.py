@@ -18,7 +18,7 @@
 
 import asyncio
 from aiohttp import web
-import json
+import simplejson as json
 import random
 import base64
 import logging
