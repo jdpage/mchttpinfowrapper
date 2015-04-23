@@ -22,3 +22,4 @@ Provides information access and server process control over HTTP.
 import logging
 
 root_logger = logging.getLogger(__name__)
+version = "0.1-pre"

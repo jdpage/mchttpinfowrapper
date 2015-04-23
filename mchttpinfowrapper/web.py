@@ -25,6 +25,7 @@ import random
 import base64
 import logging
 from . import archive
+from . import version as _version
 
 _logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ class Server:
     @asyncio.coroutine
     def handle_get_root(self, _):
         return self.make_response(data={
+            'version': _version,
             'endpoints': {
                 'players': {
                     'method': 'GET',
