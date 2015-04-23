@@ -22,6 +22,7 @@ import logging
 import re
 import os
 import os.path
+import shutil
 import fcntl
 import sys
 from datetime import datetime
@@ -55,6 +56,10 @@ class ServerWrapper:
         self._input_stream = None
         self._input_task = None
         self._output_task = None
+
+        self._world_reading = 0
+        self._world_read_cond = asyncio.Condition()
+        self._world_write_lock = asyncio.Lock()
 
         self._set_status('stopped')
         self._last_part = None
@@ -129,6 +134,7 @@ class ServerWrapper:
 
     @asyncio.coroutine
     def start(self, loop=None):
+        yield from self.acquire_write()
         self._set_status('starting')
         _logger.info("Preparing to start Minecraft server process")
         if not os.path.isdir(self._working_dir):
@@ -156,10 +162,12 @@ class ServerWrapper:
         self._output_task.cancel()
         self.process = None
         _logger.info("Minecraft server stopped")
+        yield from self.release_write()
 
     @asyncio.coroutine
     def wait(self):
-        yield from self.process.wait()
+        if self.process:
+            yield from self.process.wait()
 
     def handle_io(self, loop=None):
         if not loop:
@@ -198,7 +206,7 @@ class ServerWrapper:
         while data:
             data = yield from self._input_stream.readline()
             if data == b'll\n':
-                _logger.info(str(self.players()))
+                _logger.info(str(self.players))
             else:
                 self.process.stdin.write(data)
                 yield from self.process.stdin.drain()
@@ -253,17 +261,20 @@ class ServerWrapper:
     def _server_started_callback(self, _):
         self._set_status('running')
 
+    @property
     def players(self):
         return list(self._players.keys())
 
     def joined_at(self, player):
         return self._players[player]
 
+    @property
     def last_part_at(self):
         if self._last_part:
             return self._last_part
         return None
 
+    @property
     def status(self):
         return self._status
 
@@ -271,11 +282,102 @@ class ServerWrapper:
         self._status = status
         self._status_changed_time = self._now_tz()
 
+    @property
     def status_changed_at(self):
         return self._status_changed_time
 
+    @property
     def can_start(self):
-        return self._status == 'stopped'
+        return self.status == 'stopped'
 
+    @property
     def can_stop(self):
-        return self._status == 'running'
+        return self.status == 'running'
+
+    def world_files(self):
+        if self.status != 'stopped':
+            # TODO: raise an exception
+            return
+        world_path = os.path.join(self._working_dir, 'world')
+        for dir_path, dirnames, filenames in os.walk(world_path):
+            for n in filenames + dirnames:
+                path = os.path.join(dir_path, n)
+                yield (os.path.abspath(path),
+                       os.path.relpath(path, world_path))
+
+    @asyncio.coroutine
+    def world_extract(self, archive, dirname):
+        # TODO: delete target directory
+        dirname = os.path.normcase(os.path.normpath(dirname))
+        if dirname == '.':
+            dirname = ''
+        if self.status != 'stopped':
+            # TODO: raise an exception
+            return
+        world_new_path = os.path.join(self._working_dir, 'world_new')
+        _logger.info("extracting world to '%s'", world_new_path)
+        if os.path.exists(world_new_path):
+            shutil.rmtree(world_new_path)
+        for member in archive:
+            # gotta get this now because os.path.normpath() will remove it.
+            is_dir = member.endswith('/')
+            member = os.path.normcase(os.path.normpath(member))
+            if member.startswith(dirname):
+                if dirname != '':
+                    _, _, tail = member.partition(dirname)
+                else:
+                    tail = member
+                # ensure that there are ABSOLUTELY NO SLASHES IN FRONT OF
+                # THE TAIL PART, since os.path.join('world', '/hello')
+                # results in '/hello'.
+                tail = tail.lstrip('/')
+                out_path = os.path.join(world_new_path, tail)
+                assert out_path.startswith(world_new_path)
+                if is_dir:
+                    _logger.debug("creating directory '%s'", out_path)
+                    os.makedirs(out_path, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    _logger.debug("extracting file '%s'", out_path)
+                    with open(out_path, 'wb') as file:
+                        archive.extract_into(file)
+        world_old_path = os.path.join(self._working_dir, 'world_old')
+        world_path = os.path.join(self._working_dir, 'world')
+        if os.path.exists(world_old_path):
+            shutil.rmtree(world_old_path)
+        if os.path.exists(world_path):
+            os.rename(world_path, world_old_path)
+        os.rename(world_new_path, world_path)
+
+    @asyncio.coroutine
+    def acquire_read(self):
+        yield from self._world_read_cond.acquire()
+        self._world_reading += 1
+        self._world_read_cond.release()
+
+    @asyncio.coroutine
+    def release_read(self):
+        yield from self._world_read_cond.acquire()
+        self._world_reading = max(0, self._world_reading - 1)
+        self._world_read_cond.notify_all()
+        self._world_read_cond.release()
+
+    @asyncio.coroutine
+    def acquire_write(self):
+        yield from self._world_read_cond.acquire()
+        yield from self._world_read_cond.wait_for(
+            lambda: self._world_reading == 0)
+        yield from self._world_write_lock.acquire()
+
+    @asyncio.coroutine
+    def release_write(self):
+        self._world_write_lock.release()
+        self._world_read_cond.release()
+
+    @property
+    def can_read(self):
+        return not self._world_write_lock.locked()
+
+    @property
+    def can_write(self):
+        return self.can_read and self._world_reading == 0

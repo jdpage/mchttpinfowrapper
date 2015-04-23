@@ -16,14 +16,38 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
+from abc import ABCMeta, abstractmethod
 import asyncio
 from aiohttp import web
+import functools
 import simplejson as json
 import random
 import base64
 import logging
+from . import archive
 
 _logger = logging.getLogger(__name__)
+
+
+class RouteInfo:
+    def __init__(self):
+        self.routes = []
+
+    def handle(self, method, url):
+        def decorate(handler):
+            self.routes.append((method, url, handler))
+            return handler
+        return decorate
+
+    def handle_get(self, url):
+        return self.handle('GET', url)
+
+    def handle_post(self, url):
+        return self.handle('POST', url)
+
+    def register_all(self, instance, router):
+        for method, url, handler in self.routes:
+            router.add_route(method, url, functools.partial(handler, instance))
 
 
 class Server:
@@ -38,26 +62,33 @@ class Server:
         self._tokens = dict()
         self._loop = None
 
+    route_info = RouteInfo()
+
     @staticmethod
     def make_token():
         return bytes(random.randint(0, 255) for _ in range(32))
 
     @staticmethod
-    def make_body(data):
-        return json.dumps(data, sort_keys=True, indent=4,
-                          separators=(',', ': ')).encode('utf-8')
+    def make_response(status=200, headers=None, data=None):
+        return web.Response(
+            status=status,
+            content_type=data or 'application/json',
+            headers=headers,
+            body=data and json.dumps(data, sort_keys=True, indent=4,
+                                     separators=(',', ': ')).encode('utf-8')
+        )
 
     @asyncio.coroutine
     def require_authentication(self, request):
         if not self._key:
-            return web.Response(status=403)
+            return self.make_response(status=403)
         if 'Authorization' in request.headers:
             scheme, *auth = request.headers['Authorization'].split()
             if scheme == 'Basic':
                 remote_auth = base64.b64decode(auth[0])
                 if self._key == remote_auth:
                     return None
-        return web.Response(
+        return self.make_response(
             status=401,
             headers={
                 'WWW-Authenticate': 'Basic realm="mc admin"'
@@ -65,113 +96,192 @@ class Server:
         )
 
     @asyncio.coroutine
-    def method_not_allowed(self, allowed, body=None):
-        return web.Response(
+    def method_not_allowed(self, allowed, data=None):
+        return self.make_response(
             status=405,
-            body=body,
-            headers={
-                'Allow': ", ".join(allowed)
+            data=data,
+            headers={'Allow': ", ".join(allowed)}
+        )
+
+    @route_info.handle_get('/')
+    @asyncio.coroutine
+    def handle_get_root(self, _):
+        return self.make_response(data={
+            'endpoints': {
+                'players': {
+                    'method': 'GET',
+                    'href': '/players',
+                },
+                'world': {
+                    'method': 'GET',
+                    'href': '/world',
+                },
+                'server': {
+                    'method': 'GET',
+                    'href': '/server',
+                },
             }
-        )
+        })
 
+    @route_info.handle_get('/server')
     @asyncio.coroutine
-    def handle_root(self, _):
-        return web.Response(
-            body=self.make_body({
-                'endpoints': {
-                    'players': {
-                        'method': 'GET',
-                        'href': '/players',
-                    },
-                    'server': {
-                        'method': 'GET',
-                        'href': '/server',
-                    },
-                }
-            })
-        )
-
-    @asyncio.coroutine
-    def handle_server(self, _):
+    def handle_get_server(self, _):
         actions = {}
-        if self._mc_server.can_start():
+        if self._mc_server.can_start:
             actions['start_server'] = {
                 'method': 'POST',
                 'href': '/server/start',
             }
-        if self._mc_server.can_stop():
+        if self._mc_server.can_stop:
             actions['stop_server'] = {
                 'method': 'POST',
                 'href': '/server/stop',
             }
-        return web.Response(
-            body=self.make_body({
-                'stats': {
-                    'status_changed_at':
-                        self._mc_server.status_changed_at().isoformat(),
-                    'status': self._mc_server.status(),
-                },
-                'endpoints': actions,
-            })
-        )
+        return self.make_response(data={
+            'stats': {
+                'status_changed_at':
+                    self._mc_server.status_changed_at.isoformat(),
+                'status': self._mc_server.status,
+            },
+            'endpoints': actions,
+        })
 
+    @route_info.handle_get('/world')
     @asyncio.coroutine
-    def handle_players(self, _):
+    def handle_get_world(self, _):
+        endpoints = {}
+        if self._mc_server.status == 'stopped':
+            endpoints['download_world'] = {
+                'method': 'GET',
+                'href': '/world/archive',
+                'params': {
+                    'format': {
+                        'type': 'options',
+                        'range': ['tar', 'zip']
+                    }
+                }
+            }
+            endpoints['upload_world'] = {
+                'method': 'POST',
+                'href': '/world/archive',
+                'params': {
+                    'archive': {'type': 'file'}
+                }
+            }
+        return self.make_response(data={'endpoints': endpoints})
+
+    @route_info.handle_get('/players')
+    @asyncio.coroutine
+    def handle_get_players(self, _):
         player_info = dict()
-        for player in self._mc_server.players():
+        for player in self._mc_server.players:
             player_info[player] = {
                 'joined_at': self._mc_server.joined_at(player).isoformat()
             }
-        last_part = self._mc_server.last_part_at()
-        return web.Response(
-            body=self.make_body({
-                'last_part_at': last_part and last_part.isoformat(),
-                'players': player_info,
-            })
-        )
+        last_part = self._mc_server.last_part_at
+        return self.make_response(data={
+            'last_part_at': last_part and last_part.isoformat(),
+            'players': player_info,
+        })
 
+    @route_info.handle_post('/server/start')
     @asyncio.coroutine
-    def handle_server_start(self, request):
+    def handle_post_server_start(self, request):
         auth_request = yield from self.require_authentication(request)
         if auth_request:
             return auth_request
-        if not self._mc_server.can_start():
+        if not self._mc_server.can_start:
             return (
                 yield from self.method_not_allowed(
                     allowed=[],
-                    body=self.make_body({
-                        'server_status': self._mc_server.status(),
-                    })
+                    data={'server_status': self._mc_server.status},
                 )
             )
         yield from self._mc_server.start(self._loop)
-        return web.Response()
+        return self.make_response()
 
+    @route_info.handle_post('/server/stop')
     @asyncio.coroutine
-    def handle_server_stop(self, request):
+    def handle_post_server_stop(self, request):
         auth_request = yield from self.require_authentication(request)
         if auth_request:
             return auth_request
-        if not self._mc_server.can_stop():
+        if not self._mc_server.can_stop:
             return (
                 yield from self.method_not_allowed(
                     allowed=[],
-                    body=self.make_body({
-                        'server_status': self._mc_server.status()
-                    })
+                    data={'server_status': self._mc_server.status}
                 )
             )
         yield from self._mc_server.stop()
-        return web.Response()
+        return self.make_response()
+
+    @route_info.handle_get('/world/archive')
+    @asyncio.coroutine
+    def handle_get_world_archive(self, request):
+        if self._mc_server.status != 'stopped':
+            return (
+                yield from self.method_not_allowed(
+                    allowed=[],
+                    data={'server_status': self._mc_server.status}
+                )
+            )
+        try:
+            yield from self._mc_server.acquire_read()
+            if 'format' not in request.GET:
+                return self.make_response(
+                    status=403,
+                    data={
+                        'reason': "missing parameter",
+                        'detail': 'format',
+                    }
+                )
+            response = ArchiveResponse.new(request.GET['format'])
+            response.basename = 'minecraft_world'
+            response.start(request)
+            for filename, arcname in self._mc_server.world_files():
+                yield from response.add(filename, arcname)
+            yield from response.write_eof()
+            return response
+        finally:
+            yield from self._mc_server.release_read()
+
+    @route_info.handle_post('/world/archive')
+    @asyncio.coroutine
+    def handle_post_world_archive(self, request):
+        auth_request = yield from self.require_authentication(request)
+        if auth_request:
+            return auth_request
+        if self._mc_server.status != 'stopped':
+            return (
+                yield from self.method_not_allowed(
+                    allowed=[],
+                    data={'server_status': self._mc_server.status}
+                )
+            )
+        try:
+            yield from self._mc_server.acquire_write()
+            post_data = yield from request.post()
+            if 'archive' not in post_data:
+                return self.make_response(
+                    status=403,
+                    data={
+                        'reason': "missing parameter",
+                        'detail': 'archive',
+                    }
+                )
+            reader = archive.ArchiveReader.new(post_data['archive'].file)
+            dirname = reader.find('level.dat')
+            _logger.info("found level.dat in '%s'", dirname)
+            yield from self._mc_server.world_extract(reader, dirname)
+            return self.make_response()
+        finally:
+            yield from self._mc_server.release_write()
 
     @asyncio.coroutine
     def start(self, loop):
         app = web.Application(loop=loop)
-        app.router.add_route('GET', '/', self.handle_root)
-        app.router.add_route('GET', '/players', self.handle_players)
-        app.router.add_route('GET', '/server', self.handle_server)
-        app.router.add_route('POST', '/server/start', self.handle_server_start)
-        app.router.add_route('POST', '/server/stop', self.handle_server_stop)
+        self.route_info.register_all(self, app.router)
         self._http_server = yield from loop.create_server(
             app.make_handler(),
             self._host, self._port)
@@ -182,3 +292,40 @@ class Server:
         self._http_server.close()
         yield from self._http_server.wait_closed()
 
+
+class ArchiveResponse(web.StreamResponse):
+    def __init__(self, make_archive_writer, status=200, headers=None):
+        super().__init__(status=status)
+        if headers:
+            self.headers.extend(headers)
+        self.__archive_writer = make_archive_writer(self)
+        self.content_type = self.__archive_writer.mime_type
+
+    @classmethod
+    def new(cls, archive_format, status=200, headers=None):
+        make_writer = None
+        if archive_format == 'tar':
+            make_writer = lambda fd: archive.TarWriter(fd, compression='gz')
+        elif archive_format == 'zip':
+            make_writer = lambda fd: archive.ZipWriter(fd)
+        return cls(make_writer, status=status, headers=headers)
+
+    @property
+    def basename(self):
+        return self.__archive_writer.basename
+
+    @basename.setter
+    def basename(self, basename):
+        self.__archive_writer.basename = basename
+        self.headers['Content-Disposition'] = \
+            'attachment; filename={0}.{1}'.format(
+                basename, self.__archive_writer.file_extension)
+
+    @asyncio.coroutine
+    def add(self, filename, arcname=None):
+        yield from self.__archive_writer.add(filename, arcname)
+
+    @asyncio.coroutine
+    def write_eof(self):
+        yield from self.__archive_writer.close()
+        yield from super().write_eof()
