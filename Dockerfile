@@ -11,7 +11,7 @@ ADD requirements.txt /opt/minecraft/
 RUN pip3 install -r /opt/minecraft/requirements.txt
 
 # grab the minecraft server
-ADD https://s3.amazonaws.com/Minecraft.Download/versions/1.8.3/minecraft_server.1.8.3.jar /opt/minecraft/
+ADD https://s3.amazonaws.com/Minecraft.Download/versions/1.8.4/minecraft_server.1.8.4.jar /opt/minecraft/
 
 # add the mchttpinfowrapper sources
 ADD . /opt/minecraft
