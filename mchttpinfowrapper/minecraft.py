@@ -307,7 +307,6 @@ class ServerWrapper:
 
     @asyncio.coroutine
     def world_extract(self, archive, dirname):
-        # TODO: delete target directory
         dirname = os.path.normcase(os.path.normpath(dirname))
         if dirname == '.':
             dirname = ''
