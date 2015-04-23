@@ -4,3 +4,4 @@ server/
 *.swp
 .DS_Store
 .idea
+web_ui/key
