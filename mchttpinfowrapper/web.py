@@ -26,6 +26,7 @@ import base64
 import logging
 from . import archive
 from . import version as _version
+import urllib.parse
 
 _logger = logging.getLogger(__name__)
 
@@ -70,23 +71,31 @@ class Server:
         return bytes(random.randint(0, 255) for _ in range(32))
 
     @staticmethod
+    @asyncio.coroutine
     def make_response(request, status=200, headers=None, data=None):
         # format the data as JSON
         body = data and json.dumps(data, sort_keys=True, indent=4,
                                        separators=(',',': '))
 
-        # get the JSONP callback, if any
-        callback = None
         if request.method == 'GET' and 'callback' in request.GET:
+            # we're doing JSONP (GET + callback), so format body
             callback = request.GET['callback']
-        elif request.method == 'POST' \
-                and 'callback' in (yield from request.post()):
-            callback = request.POST['callback']
-
-        # if we're doing JSONP, wrap the data
-        if callback:
             body = '{0}({1});'.format(callback, body or 'null')
+        elif request.method == 'POST' \
+                and 'next_url' in (yield from request.post()):
+            # we're doing a redirect (POST + next_url)
+            next_url = request.POST['next_url']
+            body = body or 'null'
+            headers = headers or {}
+            headers['Location'] = \
+                next_url + urllib.parse.quote_plus(body.encode('utf-8'))
+            return web.Response(
+                status=303,
+                headers=headers,
+                body=None,
+            )
 
+        # returning body directly
         return web.Response(
             status=status,
             content_type=data or 'application/json',
@@ -97,34 +106,34 @@ class Server:
     @asyncio.coroutine
     def require_authentication(self, request):
         if not self._key:
-            return self.make_response(request, status=403)
+            return (yield from self.make_response(request, status=403))
         if 'Authorization' in request.headers:
             scheme, *auth = request.headers['Authorization'].split()
             if scheme == 'Basic':
                 remote_auth = base64.b64decode(auth[0])
                 if self._key == remote_auth:
                     return None
-        return self.make_response(
+        return (yield from self.make_response(
             request,
             status=401,
             headers={
                 'WWW-Authenticate': 'Basic realm="mc admin"'
             }
-        )
+        ))
 
     @asyncio.coroutine
     def method_not_allowed(self, request, allowed, data=None):
-        return self.make_response(
+        return (yield from self.make_response(
             request,
             status=405,
             data=data,
             headers={'Allow': ", ".join(allowed)}
-        )
+        ))
 
     @route_info.handle_get('/')
     @asyncio.coroutine
     def handle_get_root(self, request):
-        return self.make_response(request, data={
+        return (yield from self.make_response(request, data={
             'version': _version,
             'endpoints': {
                 'players': {
@@ -140,7 +149,7 @@ class Server:
                     'href': '/server',
                 },
             }
-        })
+        }))
 
     @route_info.handle_get('/server')
     @asyncio.coroutine
@@ -156,14 +165,14 @@ class Server:
                 'method': 'POST',
                 'href': '/server/stop',
             }
-        return self.make_response(request, data={
+        return (yield from self.make_response(request, data={
             'stats': {
                 'status_changed_at':
                     self._mc_server.status_changed_at.isoformat(),
                 'status': self._mc_server.status,
             },
             'endpoints': actions,
-        })
+        }))
 
     @route_info.handle_get('/world')
     @asyncio.coroutine
@@ -187,7 +196,8 @@ class Server:
                     'archive': {'type': 'file'}
                 }
             }
-        return self.make_response(request, data={'endpoints': endpoints})
+        return (yield from self.make_response(
+            request, data={'endpoints': endpoints}))
 
     @route_info.handle_get('/players')
     @asyncio.coroutine
@@ -198,10 +208,10 @@ class Server:
                 'joined_at': self._mc_server.joined_at(player).isoformat()
             }
         last_part = self._mc_server.last_part_at
-        return self.make_response(request, data={
+        return (yield from self.make_response(request, data={
             'last_part_at': last_part and last_part.isoformat(),
             'players': player_info,
-        })
+        }))
 
     @route_info.handle_post('/server/start')
     @asyncio.coroutine
@@ -218,7 +228,7 @@ class Server:
                 )
             )
         yield from self._mc_server.start(self._loop)
-        return self.make_response(request)
+        return (yield from self.make_response(request))
 
     @route_info.handle_post('/server/stop')
     @asyncio.coroutine
@@ -235,7 +245,7 @@ class Server:
                 )
             )
         yield from self._mc_server.stop()
-        return self.make_response(request)
+        return (yield from self.make_response(request))
 
     @route_info.handle_get('/world/archive')
     @asyncio.coroutine
@@ -251,14 +261,14 @@ class Server:
         try:
             yield from self._mc_server.acquire_read()
             if 'format' not in request.GET:
-                return self.make_response(
+                return (yield from self.make_response(
                     request,
                     status=403,
                     data={
                         'reason': "missing parameter",
                         'detail': 'format',
                     }
-                )
+                ))
             response = ArchiveResponse.new(request.GET['format'])
             response.basename = 'minecraft_world'
             response.start(request)
@@ -287,19 +297,19 @@ class Server:
             yield from self._mc_server.acquire_write()
             post_data = yield from request.post()
             if 'archive' not in post_data:
-                return self.make_response(
+                return (yield from self.make_response(
                     request,
                     status=403,
                     data={
                         'reason': "missing parameter",
                         'detail': 'archive',
                     }
-                )
+                ))
             reader = archive.ArchiveReader.new(post_data['archive'].file)
             dirname = reader.find('level.dat')
             _logger.info("found level.dat in '%s'", dirname)
             yield from self._mc_server.world_extract(reader, dirname)
-            return self.make_response(request)
+            return (yield from self.make_response(request))
         finally:
             yield from self._mc_server.release_write()
 
