@@ -2,9 +2,11 @@ FROM debian:testing
 MAINTAINER Jonathan David Page <jonathan@sleepingcyb.org>
 
 # install us some java and python
-RUN apt-get update && apt-get install -y default-jre-headless \
-                                         python3 \
-                                         python3-pip
+RUN apt-get update \
+ && apt-get install -y default-jre-headless \
+                       python3 \
+                       python3-pip \
+ && apt-get clean
 
 # add the required python packages
 ADD requirements.txt /opt/minecraft/
